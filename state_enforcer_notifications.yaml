@@ -1,4 +1,22 @@
+# -------------------------------------------------------------------------------------------------
+# Package State Enforcer - Ver. 1.0.0
+# Description: This is the failure notification that allow the user to retry or cancel
+#              You can customize this script to do what you want when State Enforcer failed
+#              At minimum you'll have to customize the target of multinotify with your devices.
+# Article with full details (italian language): TODO
+# Repository: TODO
+# -------------------------------------------------------------------------------------------------
+# Author: Henrik Sozzi
+# Site:   https://henriksozzi.it
+# -------------------------------------------------------------------------------------------------
+# CHANGELOG: please see the CHANGELOG.md file
+# -------------------------------------------------------------------------------------------------
+# Distributed with MIT license. PLease see LICENSE file for more details.
+# -------------------------------------------------------------------------------------------------
+
 script:
+  # This script will be called from state_enforcer script to inform the user that it failed to set the desired state.
+  # Don't use directly this script, it's for internal use.
   state_enforcer_notifications:
     alias: "State enforcer notifications"
     description: "Notify if state enforcer failed to set the desired state"
@@ -39,12 +57,17 @@ script:
       entity_name: "{{ states[entity_id].name }}"
       entity_state: "{{ states(entity_id) }}"
     sequence:
+      # This notify users you want that State Enforcer failed to set the desired state, allowing to Retry or Cancel.
+      # Customize it with your targets or with your specific code, if you don't like multinotify (...really? :D )
+      # You can even add something fancy like turning on a red light to tell you there was a problem, if you want.
+      # Just remember to reapply your customizations if you update the script
+      # Localize text to your specific language. This is in italian.
       - action: script.multinotify
         data:
           title: "State enforcer timeout"
           message: "Non è stato possibile {{'accendere' if expected_state == 'on' else 'spegnere'}} l'entità {{ entity_name }} entro {{ timeout }} secondi. Valore attuale: {{ entity_state }}"
           notify_app: notify.mobile_app_tel_henrik
-          # alexa_target: media_player.piani_inferiori
+          alexa_target: media_player.piani_inferiori
           notify_pushover: notify.pushover
           notify_html5: notify.html5_hsozziedge
           notify_ha: true
@@ -70,25 +93,34 @@ automation:
     alias: "Azione - Notifica - State enforcer"
     description: "Actions from state enforcer notifications"
     trigger:
+      # We get actions from mobile app and from HTML5 push notifications the same way
       - trigger: event
         event_type:
           - "mobile_app_notification_action"
           - "html5_notification.clicked"
     variables:
+      # Here we set the minimun needed variables to use in conditions
       event_action_complete: "{{ trigger.event.data['action'] }}"
       action: "{{ event_action_complete | regex_findall('^([^|]+)') | first }}"
     conditions:
+      # We check that the action is one of managed ones
       - "{{ action in ['state_enforcer_retry', 'state_enforcer_cancel']}}"
     action:
+      # Here we set more variables. There is no way to "transport" some information (like entity_id, expected state and timeout) with the notification
+      # so that they'll be posted back when the user press the action. So I've put them in the action itself and I separate the components with regex.
+      # The action format is thus: <action>|<entity_id>|<expected_state>|<timeout>
+      # For example if we tried to turn off light.kitchen for 60 seconds, it failed and send the notification to the user that pressed the "Retry" button
+      # we will receive an action like this: "state_enforcer_retry|light.kitchen|off|60"
       - variables:
           entity_id: "{{ event_action_complete | regex_findall('^[^|]+\\|([^|]+)') | first }}"
           expected_state: "{{ event_action_complete | regex_findall('^[^|]+\\|[^|]+\\|([^|]+)') | first }}"
           timeout: "{{ (event_action_complete | regex_findall('^[^|]+\\|[^|]+\\|[^|]+\\|([^|]+)') | first | int(30)) }}"
           entity_name: "{{ states[entity_id].name }}"
-      - alias: "A seconda della risposta"
+      - alias: "Depending on user reply"
         choose:
           - conditions:
               - "{{ action == 'state_enforcer_retry'}}"
+            # User preseend "Retry"
             sequence:
               - alias: "Async retry state enforcer"
                 action: script.turn_on
@@ -102,12 +134,13 @@ automation:
                     timeout: "{{ timeout }}"
           - conditions:
               - "{{ action == 'state_enforcer_cancel' }}"
+            # User preseend "Cancel"
             sequence:
               - alias: "Inform that user cancelled"
                 action: persistent_notification.create
                 continue_on_error: true
                 data:
-                  title: "State enforcer: user cancelled"
+                  title: "State enforcer: annullato dall'utente"
                   message: >
                     Non è stato possibile {{'accendere' if action == 'on' else 'spegnere'}} l'entità {{ entity_name }} entro {{ timeout }} secondi
-                    In seguito (**{{ now().timestamp() | timestamp_custom("%Y-%m-%d %H:%M:%S") }}**) qualcuno ha annullato eventuali ulteriori tentativi
+                    In seguito (**{{ now().timestamp() | timestamp_custom("%Y-%m-%d %H:%M:%S") }}**) un utente ha annullato eventuali ulteriori tentativi

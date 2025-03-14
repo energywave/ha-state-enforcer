@@ -6,7 +6,7 @@
 # you retry or cancel.
 # In case of failure and during the operation a persistent notification is generated
 # Article with full details (italian language): TODO
-# Repository: TODO
+# Repository: https://github.com/energywave/ha-state-enforcer
 # -------------------------------------------------------------------------------------------------
 # Author: Henrik Sozzi
 # Site:   https://henriksozzi.it
@@ -16,7 +16,7 @@
 # Distributed with MIT license. PLease see LICENSE file for more details.
 # -------------------------------------------------------------------------------------------------
 
-# Please refer to the readme visible here: TODO
+# Please refer to the readme visible here: https://github.com/energywave/ha-state-enforcer/blob/main/README.md
 
 # DEPENDENCIES
 # This package requires the following components to be installed and working:
@@ -52,6 +52,7 @@
 # The timeout argument is not required. If you don't specify it it will be assumed 30 seconds.
 
 script:
+  # State Enforcer script. Use it the async way with action: script.turn_on, not by calling it directly in the action! Please see header example or readme on github.
   state_enforcer:
     alias: "Turn on or off an entity and ensure the state"
     description: "Turn on or off an entity and then check that the state was changed and notify if that wasn't done after the specified time"
@@ -90,10 +91,12 @@ script:
             unit_of_measurement: "seconds"
     variables:
       service_name: "{{ 'homeassistant.turn_on' if action == 'on' else 'homeassistant.turn_off' }}"
-      expected_state: "{{ action }}"
-      entity_lock: "tmp.lock_toggle_{{ entity_id | replace('.', '_') }}"
-      timeout_sec: "{{ timeout | default(30) }}"
+      expected_state: "{{ action }}" # "on" or "off"
+      entity_lock: "tmp.lock_toggle_{{ entity_id | replace('.', '_') }}" # Entity name we will use to lock the execution based on the specific entity
+      timeout_sec: "{{ timeout | default(30) }}" # Timeout with default value
+      start_time: "{{ now().timestamp() }}" # Start time we will use to evaluate time elapsed for timeout
     sequence:
+      # We create a persistent notification during the execution of the script so that we know if there is a State Enforcer instance running
       - alias: "Create a persistent notification"
         action: persistent_notification.create
         continue_on_error: true
@@ -102,6 +105,9 @@ script:
           message: "Enforcing state **{{ expected_state }}** for **{{ states[entity_id].name }}** (max {{ timeout_sec }} seconds)..."
           notification_id: "{{ entity_id }}"
 
+      # We stop other instance of this script that is working on the same entity, if present. 
+      # So if wanted to turn on a light and, while trying to do it, we issue the command to turn it off this will shit down the turn on trial and start the turn off one.
+      # It's like having "mode: restart" for the script but based on the specific entity you requested (Home Assistant don't have such a feature, we implement it in that way)
       - alias: "Stop another instance on the same light, if running"
         if: "{{ is_state(entity_lock, 'running') }}"
         then:
@@ -127,6 +133,7 @@ script:
                     State enforcer could not stop a previous instance while enforcing state **{{ expected_state }}** of **{{ states[entity_id].name }}**.
                     Current entity lock value: **{{ states(entity_lock) }}**"
 
+      # Here we set the lock that allows us to do what described in the previous block
       - alias: "Set the lock"
         action: python_script.set_state
         continue_on_error: true
@@ -135,12 +142,13 @@ script:
           entity_id: "{{ entity_lock }}"
           state: "running"
 
+      # This is the real core: a cycle that will exit when the state is what we desire, the lock is telling us to stop (another instance) or timeout occured
       - alias: "Cycle to do the action and check the state"
         repeat:
           while:
             - "{{ not is_state(entity_id, expected_state) }}" # State check
             - "{{ is_state(entity_lock, 'running') }}" # Lock check
-            - "{{ repeat.index * 5 < timeout_sec }}" # Timeout check
+            - "{{ (now().timestamp() - start_time) | int < timeout }}" # Timeout check
           sequence:
             - alias: "Try to set the state"
               action: "{{ service_name }}"
@@ -152,6 +160,7 @@ script:
               timeout: "00:00:05"
               continue_on_timeout: true
 
+      # If we failed to set the state after the timeout specified we will call the state_enforcer_notifications script, in the other file
       - alias: "If could not set the desired state we have failed. Notify it to the user"
         if: "{{ not is_state(entity_id, expected_state) }}"
         then:
@@ -166,6 +175,7 @@ script:
                 expected_state: "{{ expected_state }}"
                 timeout: "{{ timeout_sec }}"
 
+      # Now we remove the lock as the script is ended, allowing new instances to know there is no other instance running
       - alias: "Remove the lock"
         action: python_script.set_state
         continue_on_error: true
@@ -174,6 +184,7 @@ script:
           entity_id: "{{ entity_lock }}"
           state: "stopped"
 
+      # At last we remove the persistent notification that is telling us there is an instance of State Enforcer running
       - alias: "Eventually clear a previous persistent notification"
         action: persistent_notification.dismiss
         continue_on_error: true
