@@ -1,0 +1,181 @@
+# -------------------------------------------------------------------------------------------------
+# Package State Enforcer - Ver. 1.0.0
+# Description: Turn on or off an entity and check multiple times that the state is what you expect to be,
+# retrying to change its state, until a specified timeout occurs.
+# If after the timeout it could not update the desired state an actionable notification is made that let
+# you retry or cancel.
+# In case of failure and during the operation a persistent notification is generated
+# Article with full details (italian language): TODO
+# Repository: TODO
+# -------------------------------------------------------------------------------------------------
+# Author: Henrik Sozzi
+# Site:   https://henriksozzi.it
+# -------------------------------------------------------------------------------------------------
+# CHANGELOG: please see the CHANGELOG.md file
+# -------------------------------------------------------------------------------------------------
+# Distributed with MIT license. PLease see LICENSE file for more details.
+# -------------------------------------------------------------------------------------------------
+
+# Please refer to the readme visible here: TODO
+
+# DEPENDENCIES
+# This package requires the following components to be installed and working:
+# - Multinotify (to make notifications. You can replace state_enforcer_notifications script code
+#   with your own if you don't want to use multinotify)
+#   * Get it here: https://github.com/energywave/multinotify )
+# - set_state script to create and set dynamic entities. PAY ATTENTION that several versions of
+#   that script exists! You must use the version with the allow_create argument!
+#   * Get it from @xannor repo here:
+#     https://github.com/xannor/hass_py_set_state
+#   * Or get it on my blog with explanation in IT language here:
+#     https://henriksozzi.it/2021/04/impostare-lo-stato-di-unentita-in-home-assistant/
+
+# IMPORTANT NOTE ABOUT ASYNC USE
+# Call the action script.turn_on and NOT directly with the action script.state_enforcer
+# as in the first case the execution is asynchronous while in the second case it will
+# be synchronous. What does it mean? If you specify for example 90 seconds timeout it could stop your
+# script or automation for 90 seconds!
+# By using script.turn_on, however, the execution instantly continue on your script or automation
+# and this script will work in background.
+
+# Example about how to use it:
+# action: script.turn_on
+# continue_on_error: true
+# target:
+#   entity_id: script.state_enforcer
+# data:
+#   variables:
+#     entity_id: light.living_room
+#     action: off
+#     timeout: 30
+
+# The timeout argument is not required. If you don't specify it it will be assumed 30 seconds.
+
+script:
+  state_enforcer:
+    alias: "Turn on or off an entity and ensure the state"
+    description: "Turn on or off an entity and then check that the state was changed and notify if that wasn't done after the specified time"
+    mode: parallel
+    max: 10
+    fields:
+      entity_id:
+        description: "Entity to turn on or off"
+        example: "light.living_room"
+        required: true
+        selector:
+          entity:
+            filter:
+              domain:
+                - light
+                - switch
+                - group
+      action:
+        description: "Action to execute (on/off)"
+        example: "off"
+        required: true
+        selector:
+          select:
+            options:
+              - "on"
+              - "off"
+      timeout:
+        description: "Timeout to ensure the state"
+        example: "30"
+        required: false
+        selector:
+          number:
+            min: 5
+            max: 300
+            step: 5
+            unit_of_measurement: "seconds"
+    variables:
+      service_name: "{{ 'homeassistant.turn_on' if action == 'on' else 'homeassistant.turn_off' }}"
+      expected_state: "{{ action }}"
+      entity_lock: "tmp.lock_toggle_{{ entity_id | replace('.', '_') }}"
+      timeout_sec: "{{ timeout | default(30) }}"
+    sequence:
+      - alias: "Create a persistent notification"
+        action: persistent_notification.create
+        continue_on_error: true
+        data:
+          title: State enforcer running
+          message: "Enforcing state **{{ expected_state }}** for **{{ states[entity_id].name }}** (max {{ timeout_sec }} seconds)..."
+          notification_id: "{{ entity_id }}"
+
+      - alias: "Stop another instance on the same light, if running"
+        if: "{{ is_state(entity_lock, 'running') }}"
+        then:
+          - alias: "Stop other instance"
+            action: python_script.set_state
+            continue_on_error: true
+            data:
+              allow_create: true
+              entity_id: "{{ entity_lock }}"
+              state: "stop"
+          - wait_template: "{{ is_state(entity_lock, 'stopped') }}"
+            timeout: "00:06:00"
+            continue_on_timeout: true
+          - if: "{{ not is_state(entity_lock, 'stopped') }}"
+            then:
+              - alias: "Inform of the failure"
+                action: persistent_notification.create
+                continue_on_error: true
+                data:
+                  title: State enforcer warning
+                  message: >
+                    **{{ now().timestamp() | timestamp_custom("%Y-%m-%d %H:%M:%S") }}**
+                    State enforcer could not stop a previous instance while enforcing state **{{ expected_state }}** of **{{ states[entity_id].name }}**.
+                    Current entity lock value: **{{ states(entity_lock) }}**"
+
+      - alias: "Set the lock"
+        action: python_script.set_state
+        continue_on_error: true
+        data:
+          allow_create: true
+          entity_id: "{{ entity_lock }}"
+          state: "running"
+
+      - alias: "Cycle to do the action and check the state"
+        repeat:
+          while:
+            - "{{ not is_state(entity_id, expected_state) }}" # State check
+            - "{{ is_state(entity_lock, 'running') }}" # Lock check
+            - "{{ repeat.index * 5 < timeout_sec }}" # Timeout check
+          sequence:
+            - alias: "Try to set the state"
+              action: "{{ service_name }}"
+              continue_on_error: true
+              target:
+                entity_id: "{{ entity_id }}"
+            - alias: "Wait 5 sec but exit if the lock requests to stop"
+              wait_template: "{{ is_state(entity_lock, 'stop') or is_state(entity_id, expected_state) }}"
+              timeout: "00:00:05"
+              continue_on_timeout: true
+
+      - alias: "If could not set the desired state we have failed. Notify it to the user"
+        if: "{{ not is_state(entity_id, expected_state) }}"
+        then:
+          - alias: "Async notification about the failure"
+            action: script.turn_on
+            continue_on_error: true
+            target:
+              entity_id: script.state_enforcer_notifications
+            data:
+              variables:
+                entity_id: "{{ entity_id }}"
+                expected_state: "{{ expected_state }}"
+                timeout: "{{ timeout_sec }}"
+
+      - alias: "Remove the lock"
+        action: python_script.set_state
+        continue_on_error: true
+        data:
+          allow_create: true
+          entity_id: "{{ entity_lock }}"
+          state: "stopped"
+
+      - alias: "Eventually clear a previous persistent notification"
+        action: persistent_notification.dismiss
+        continue_on_error: true
+        data:
+          notification_id: "{{ entity_id }}"

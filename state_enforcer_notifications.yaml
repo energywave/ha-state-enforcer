@@ -1,0 +1,113 @@
+script:
+  state_enforcer_notifications:
+    alias: "State enforcer notifications"
+    description: "Notify if state enforcer failed to set the desired state"
+    mode: parallel
+    max: 10
+    fields:
+      entity_id:
+        description: "Entity we failed to change the state"
+        example: "light.living_room"
+        required: true
+        selector:
+          entity:
+            filter:
+              domain:
+                - light
+                - switch
+                - group
+      expected_state:
+        description: "Action that was failed to set"
+        example: "off"
+        required: true
+        selector:
+          select:
+            options:
+              - "on"
+              - "off"
+      timeout:
+        description: "Timeout that was used to ensure the state"
+        example: "30"
+        required: true
+        selector:
+          number:
+            min: 5
+            max: 300
+            step: 5
+            unit_of_measurement: "seconds"
+    variables:
+      entity_name: "{{ states[entity_id].name }}"
+      entity_state: "{{ states(entity_id) }}"
+    sequence:
+      - action: script.multinotify
+        data:
+          title: "State enforcer timeout"
+          message: "Non è stato possibile {{'accendere' if expected_state == 'on' else 'spegnere'}} l'entità {{ entity_name }} entro {{ timeout }} secondi. Valore attuale: {{ entity_state }}"
+          notify_app: notify.mobile_app_tel_henrik
+          # alexa_target: media_player.piani_inferiori
+          notify_pushover: notify.pushover
+          notify_html5: notify.html5_hsozziedge
+          notify_ha: true
+          icon: warning
+          group: state_enforcer
+          channel: warning
+          subtitle: "Timeout {{'accensione' if expected_state == 'on' else 'spegnimento'}} {{ entity_name }} dopo {{ timeout }} sec"
+          app_actions:
+            - action: "state_enforcer_retry|{{ entity_id }}|{{ expected_state }}|{{ timeout }}"
+              icon: /local/refresh.png
+              title: "Riprova"
+              data:
+                entity_id: "{{ entity_id }}"
+            - action: "state_enforcer_cancel|{{ entity_id }}|{{ expected_state }}|{{ timeout }}"
+              icon: /local/cancel.png
+              title: "Annulla"
+              data:
+                entity_id: "{{ entity_id }}"
+
+automation:
+  # Action from state enforcer notify
+  - id: 2408f862-1045-4eb4-91f1-f5a47bc05c55
+    alias: "Azione - Notifica - State enforcer"
+    description: "Actions from state enforcer notifications"
+    trigger:
+      - trigger: event
+        event_type:
+          - "mobile_app_notification_action"
+          - "html5_notification.clicked"
+    variables:
+      event_action_complete: "{{ trigger.event.data['action'] }}"
+      action: "{{ event_action_complete | regex_findall('^([^|]+)') | first }}"
+    conditions:
+      - "{{ action in ['state_enforcer_retry', 'state_enforcer_cancel']}}"
+    action:
+      - variables:
+          entity_id: "{{ event_action_complete | regex_findall('^[^|]+\\|([^|]+)') | first }}"
+          expected_state: "{{ event_action_complete | regex_findall('^[^|]+\\|[^|]+\\|([^|]+)') | first }}"
+          timeout: "{{ (event_action_complete | regex_findall('^[^|]+\\|[^|]+\\|[^|]+\\|([^|]+)') | first | int(30)) }}"
+          entity_name: "{{ states[entity_id].name }}"
+      - alias: "A seconda della risposta"
+        choose:
+          - conditions:
+              - "{{ action == 'state_enforcer_retry'}}"
+            sequence:
+              - alias: "Async retry state enforcer"
+                action: script.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: script.state_enforcer
+                data:
+                  variables:
+                    entity_id: "{{ entity_id }}"
+                    action: "{{ expected_state }}"
+                    timeout: "{{ timeout }}"
+          - conditions:
+              - "{{ action == 'state_enforcer_cancel' }}"
+            sequence:
+              - alias: "Inform that user cancelled"
+                action: persistent_notification.create
+                continue_on_error: true
+                data:
+                  title: "State enforcer: user cancelled"
+                  message: >
+                    Non è stato possibile {{'accendere' if action == 'on' else 'spegnere'}} l'entità {{ entity_name }} entro {{ timeout }} secondi
+                    In seguito (**{{ now().timestamp() | timestamp_custom("%Y-%m-%d %H:%M:%S") }}**) qualcuno ha annullato eventuali ulteriori tentativi
