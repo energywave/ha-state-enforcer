@@ -101,7 +101,7 @@ automation:
     variables:
       # Here we set the minimun needed variables to use in conditions
       event_action_complete: "{{ trigger.event.data['action'] }}"
-      action: "{{ event_action_complete | regex_findall('^([^|]+)') | first }}"
+      action: "{{ event_action_complete | regex_findall('[^|]+') | first }}"
     conditions:
       # We check that the action is one of managed ones
       - "{{ action in ['state_enforcer_retry', 'state_enforcer_cancel']}}"
@@ -112,9 +112,9 @@ automation:
       # For example if we tried to turn off light.kitchen for 60 seconds, it failed and send the notification to the user that pressed the "Retry" button
       # we will receive an action like this: "state_enforcer_retry|light.kitchen|off|60"
       - variables:
-          entity_id: "{{ event_action_complete | regex_findall('^[^|]+\\|([^|]+)') | first }}"
-          expected_state: "{{ event_action_complete | regex_findall('^[^|]+\\|[^|]+\\|([^|]+)') | first }}"
-          timeout: "{{ (event_action_complete | regex_findall('^[^|]+\\|[^|]+\\|[^|]+\\|([^|]+)') | first | int(30)) }}"
+          entity_id: "{{ (event_action_complete | regex_findall('[^|]+'))[1] }}"
+          expected_state: "{{ (event_action_complete | regex_findall('[^|]+'))[2] }}"
+          timeout: "{{ (event_action_complete | regex_findall('[^|]+'))[3] | int(30) }}"
           entity_name: "{{ states[entity_id].name }}"
       - alias: "Depending on user reply"
         choose:
