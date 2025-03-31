@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-# Package State Enforcer - Ver. 1.0.0
+# Package State Enforcer - Ver. 1.0.1
 # Description: Turn on or off an entity and check multiple times that the state is what you expect to be,
 # retrying to change its state, until a specified timeout occurs.
 # If after the timeout it could not update the desired state an actionable notification is made that let
@@ -160,9 +160,9 @@ script:
               timeout: "00:00:05"
               continue_on_timeout: true
 
-      # If we failed to set the state after the timeout specified we will call the state_enforcer_notifications script, in the other file
-      - alias: "If could not set the desired state we have failed. Notify it to the user"
-        if: "{{ not is_state(entity_id, expected_state) }}"
+      # If we failed to set the state, there isn't another instance and timeout elapsed then we will call the state_enforcer_notifications script, in the other file
+      - alias: "If a timeout setting entity state happened: notify it to the user"
+        if: "{{ not is_state(entity_id, expected_state) and is_state(entity_lock, 'running') and (now().timestamp() - start_time) | int >= timeout}}"
         then:
           - alias: "Async notification about the failure"
             action: script.turn_on
@@ -175,6 +175,16 @@ script:
                 expected_state: "{{ expected_state }}"
                 timeout: "{{ timeout_sec }}"
 
+      # We remove the persistent notification that is telling us there is an instance of State Enforcer running before setting state to stopped (that will continue other instance, if present)
+      - alias: "If there isn't another instance we remove the running notification"
+        if: "{{ is_state(entity_lock, 'running') }}"
+        then:
+          - alias: "Chear the running persistent notification"
+            action: persistent_notification.dismiss
+            continue_on_error: true
+            data:
+              notification_id: "{{ entity_id }}"
+
       # Now we remove the lock as the script is ended, allowing new instances to know there is no other instance running
       - alias: "Remove the lock"
         action: python_script.set_state
@@ -183,10 +193,3 @@ script:
           allow_create: true
           entity_id: "{{ entity_lock }}"
           state: "stopped"
-
-      # At last we remove the persistent notification that is telling us there is an instance of State Enforcer running
-      - alias: "Eventually clear a previous persistent notification"
-        action: persistent_notification.dismiss
-        continue_on_error: true
-        data:
-          notification_id: "{{ entity_id }}"
